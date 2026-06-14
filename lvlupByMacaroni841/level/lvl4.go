@@ -53,8 +53,58 @@ func NewLvlFour(ctx context.Context) (LvlFour, error) {
 
 func (l LvlFour) Clean() {
 	_ = os.Remove(l.HookFile)
-	_ = l.socket.Close()
+	if l.socket != nil {
+		_ = l.socket.Close()
+	}
+	_ = os.Remove(socket)
 	return
+}
+
+func (s LvlFour) timeCatcher(ctx context.Context) chan int {
+	c := make(chan int)
+	go func() {
+		for {
+			conn, err := s.socket.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				log.Fatal(err)
+			}
+
+			defer conn.Close()
+			buf := make([]byte, 8)
+
+			for {
+				if err := binary.Read(conn, binary.LittleEndian, &buf); err != nil {
+					if err == io.EOF {
+						break
+					}
+					log.Fatal(errors.Join(errors.New("error reading socket"), err))
+				}
+			}
+			select {
+			case <-ctx.Done():
+				s.socket.Close()
+				close(c)
+				os.Remove(socket)
+				return
+			case c <- int(binary.LittleEndian.Uint64(buf)):
+			}
+		}
+	}()
+	return c
+}
+
+func loadHook() (string, error) {
+	file, err := os.CreateTemp("/tmp", "hook")
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.Write(hook); err != nil {
+		return "", err
+	}
+	return file.Name(), nil
 }
 
 func keygen(epoch int) []byte {
@@ -119,51 +169,4 @@ func magicBytes() []byte {
 	return mn
 }
 
-func loadHook() (string, error) {
-	file, err := os.CreateTemp("/tmp", "")
-	if err != nil {
-		return "", err
-	}
-	if _, err := file.Write(hook); err != nil {
-		return "", err
-	}
-	return file.Name(), nil
-}
-
 const socket = "/tmp/keygen.sock"
-
-func (s LvlFour) timeCatcher(ctx context.Context) chan int {
-	c := make(chan int)
-	go func() {
-		for {
-			conn, err := s.socket.Accept()
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return
-				}
-				log.Fatal(err)
-			}
-
-			defer conn.Close()
-			buf := make([]byte, 8)
-
-			for {
-				if err := binary.Read(conn, binary.LittleEndian, &buf); err != nil {
-					if err == io.EOF {
-						break
-					}
-					log.Fatal(errors.Join(errors.New("error reading socket"), err))
-				}
-			}
-			select {
-			case <-ctx.Done():
-				s.socket.Close()
-				close(c)
-				os.Remove(socket)
-				return
-			case c <- int(binary.LittleEndian.Uint64(buf)):
-			}
-		}
-	}()
-	return c
-}

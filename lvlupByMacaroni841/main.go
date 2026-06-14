@@ -8,6 +8,8 @@ import (
 	"lvlup/level"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 )
 
 const (
@@ -23,22 +25,31 @@ func main() {
 		arg = "0x3"
 	}
 
-	if err := start(arg); err != nil {
+	if err := run(arg); err != nil {
 		panic(err)
 	}
 }
 
-func start(arg string) error {
+func run(arg string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := exec.Command(appPath, arg)
 	env := os.Environ()
 
 	lvl4, err := level.NewLvlFour(ctx)
+	defer lvl4.Clean()
 	if err != nil {
 		return err
 	}
 	c.Env = append(env, "LD_PRELOAD="+lvl4.HookFile)
+
+	cSig := make(chan os.Signal, 1)
+	signal.Notify(cSig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-cSig
+		lvl4.Clean()
+		os.Exit(0)
+	}()
 
 	session, err := engine.NewSession(c, os.Stdout)
 	if err != nil {
@@ -51,12 +62,11 @@ func start(arg string) error {
 	eng.Register("Level 3 -", level.LvlThree)
 	eng.Register("Level 4 -", lvl4.Handler)
 
-	go eng.Start()
+	eng.Start()
 
 	if err = session.Wait(); err != nil {
 		fmt.Println("process exited with error:", err)
 	}
 
-	lvl4.Clean()
 	return session.Close()
 }
