@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"lvlup/engine"
 	"lvlup/level"
 	"os"
 	"os/exec"
-	"os/signal"
-	"time"
 )
 
 const (
@@ -24,35 +23,40 @@ func main() {
 		arg = "0x3"
 	}
 
-	start(arg)
+	if err := start(arg); err != nil {
+		panic(err)
+	}
 }
 
-func start(arg string) {
+func start(arg string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := exec.Command(appPath, arg)
 	env := os.Environ()
 
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, os.Kill)
-
-	unixSocket, lvl4, err := level.LvlFour(ctx)
+	lvl4, err := level.NewLvlFour(ctx)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	c.Env = append(env, "LD_PRELOAD="+unixSocket)
+	c.Env = append(env, "LD_PRELOAD="+lvl4.HookFile)
 
-	eng, err := engine.New(c)
+	session, err := engine.NewSession(c, os.Stdout)
 	if err != nil {
-		panic(err)
+		return err
+	}
+	eng := engine.NewEngine(&session)
+
+	eng.Register("Level 1 -", level.LvlOne)
+	eng.Register("Level 2 -", level.LvlTwo)
+	eng.Register("Level 3 -", level.LvlThree)
+	eng.Register("Level 4 -", lvl4.Handler)
+
+	go eng.Start()
+
+	if err = session.Wait(); err != nil {
+		fmt.Println("process exited with error:", err)
 	}
 
-	eng.Handle("Level 1 -", level.LvlOne)
-	eng.Handle("Level 2 -", level.LvlTwo)
-	eng.Handle("Level 3 -", level.LvlThree)
-	eng.Handle("Level 4 -", lvl4)
-
-	// Handle pty size.
-	_ = eng.Serve()
-	time.Sleep(100 * time.Millisecond)
+	lvl4.Clean()
+	return session.Close()
 }

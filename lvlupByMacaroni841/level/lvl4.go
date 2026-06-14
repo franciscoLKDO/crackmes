@@ -21,16 +21,40 @@ import (
 //go:embed c/hook.so
 var hook []byte
 
-func LvlFour(ctx context.Context) (string, engine.HandlerFunc, error) {
-	hookPath, err := loadHook(ctx)
+type LvlFour struct {
+	HookFile string
+	socket   net.Listener
+	Handler  engine.HandlerFunc
+}
+
+func NewLvlFour(ctx context.Context) (LvlFour, error) {
+	hookPath, err := loadHook()
 	if err != nil {
-		return "", nil, err
+		return LvlFour{}, err
 	}
-	chw := timeCatcher(ctx)
-	return hookPath, func(_ io.Reader, w io.WriteCloser) error {
+
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		return LvlFour{}, err
+	}
+
+	lvl := LvlFour{
+		HookFile: hookPath,
+		socket:   l,
+	}
+
+	chw := lvl.timeCatcher(ctx)
+	lvl.Handler = func(_ io.Reader, w io.WriteCloser) error {
 		_, err := w.Write((append(keygen(<-chw), '\n')))
 		return err
-	}, nil
+	}
+	return lvl, nil
+}
+
+func (l LvlFour) Clean() {
+	_ = os.Remove(l.HookFile)
+	_ = l.socket.Close()
+	return
 }
 
 func keygen(epoch int) []byte {
@@ -95,7 +119,7 @@ func magicBytes() []byte {
 	return mn
 }
 
-func loadHook(ctx context.Context) (string, error) {
+func loadHook() (string, error) {
 	file, err := os.CreateTemp("/tmp", "")
 	if err != nil {
 		return "", err
@@ -103,25 +127,16 @@ func loadHook(ctx context.Context) (string, error) {
 	if _, err := file.Write(hook); err != nil {
 		return "", err
 	}
-	go func() {
-		<-ctx.Done()
-		os.Remove(file.Name())
-	}()
 	return file.Name(), nil
 }
 
 const socket = "/tmp/keygen.sock"
 
-func timeCatcher(ctx context.Context) chan int {
+func (s LvlFour) timeCatcher(ctx context.Context) chan int {
 	c := make(chan int)
-	l, err := net.Listen("unix", socket)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	go func() {
 		for {
-			conn, err := l.Accept()
+			conn, err := s.socket.Accept()
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					return
@@ -142,7 +157,7 @@ func timeCatcher(ctx context.Context) chan int {
 			}
 			select {
 			case <-ctx.Done():
-				l.Close()
+				s.socket.Close()
 				close(c)
 				os.Remove(socket)
 				return

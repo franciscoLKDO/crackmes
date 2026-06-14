@@ -1,30 +1,14 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
-	"context"
-	"fmt"
 	"io"
-	"log"
 	"os"
-	"os/exec"
-	"os/signal"
-	"syscall"
-
-	"github.com/creack/pty"
+	"sync"
 )
 
 type HandlerFunc func(reader io.Reader, writer io.WriteCloser) error
-
-type Context struct {
-	Session *Session
-	Input   []byte
-}
-
-type Session struct {
-	Stdin  io.WriteCloser
-	Stdout io.Reader
-}
 
 type route struct {
 	match   []byte
@@ -32,69 +16,76 @@ type route struct {
 }
 
 type Engine struct {
-	routes []route
-	ptmx   *os.File
+	mu      sync.Mutex
+	session *Session
+	routes  []route
+	stdin   *bufio.Reader
 }
 
-func New(c *exec.Cmd) (Engine, error) {
-	ptmx, err := pty.Start(c)
-	if err != nil {
-		return Engine{}, err
-	}
-
+func NewEngine(s *Session) Engine {
 	return Engine{
-		ptmx: ptmx,
-	}, nil
+		session: s,
+		stdin:   bufio.NewReader(os.Stdin),
+	}
 }
 
-func (e *Engine) Handle(match string, h HandlerFunc) {
+func (e *Engine) Register(match string, h HandlerFunc) {
 	e.routes = append(e.routes, route{
 		match:   []byte(match),
 		handler: h,
 	})
 }
 
-func (e Engine) Dispatch(ctx context.Context, data []byte) error {
+func (e *Engine) Dispatch(data []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, r := range e.routes {
 		if bytes.Contains(data, r.match) {
-			return r.handler(e.ptmx, e.ptmx)
+			return r.handler(e.session.ptmx, e.session.ptmx)
 		}
 	}
 	return nil
 }
 
-func (e Engine) Serve() error {
-	defer func() { _ = e.ptmx.Close() }()
-
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
-	go func() {
-		for range ch {
-			if err := pty.InheritSize(os.Stdin, e.ptmx); err != nil {
-				log.Printf("error resizing pty: %s", err)
-			}
-		}
-	}()
-	ch <- syscall.SIGWINCH // Initial resize.
-	defer func() { signal.Stop(ch); close(ch) }()
-	go func() { e.ptmx.ReadFrom(os.Stdin) }()
-
+func (e *Engine) Run() {
 	buf := make([]byte, 4096)
-	var line []byte
 	for {
-		n, err := e.ptmx.Read(buf)
-		if err != nil {
-			return err
+		n, _ := e.session.Read(buf)
+		if n == 0 {
+			continue
 		}
-		line = append(line, buf[:n]...)
-		fmt.Fprintf(os.Stdout, "%s", buf[:n])
+		data := buf[:n]
 
-		if err := e.Dispatch(context.Background(), line); err != nil {
-			return err
-		}
-
-		if bytes.Contains(line, []byte("\n")) {
-			line = []byte{}
-		}
+		e.Dispatch(data)
+		os.Stdout.Write(data)
 	}
+}
+
+// runInput reads from user, processes through handler, sends to binary
+func (e *Engine) runInput() {
+	for {
+		// Read from stdin
+		line, _ := ReadLineFromReader(e.stdin)
+		if len(line) == 0 {
+			continue
+		}
+
+		// Send (transformed or original) to binary
+		e.session.Write(line)
+	}
+}
+
+// ReadLineFromReader reads a line from a reader
+// Used for interactive input in handlers
+func ReadLineFromReader(r io.Reader) ([]byte, error) {
+	scanner := bufio.NewScanner(r)
+	if scanner.Scan() {
+		return append(scanner.Bytes(), '\n'), nil
+	}
+	return nil, scanner.Err()
+}
+
+func (e *Engine) Start() {
+	go e.Run()
+	go e.runInput()
 }
