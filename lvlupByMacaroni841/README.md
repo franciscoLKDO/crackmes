@@ -24,8 +24,8 @@ The repository launches an external binary under a pseudo-terminal, inspects its
 ## Requirements
 
 - Go `1.25` or later
-- `gcc` for building the shared hook library
-- `./lvlupByMacaroni841` executable present in the repository root
+- `gcc` for building the shared hook library (optional, embeded in go binary)
+- `./lvlupByMacaroni841` downloaded from [crackmes.one](https://crackmes.one/crackme/66c724b9b899a3b9dd02ad98) 
 
 ## Build and run
 
@@ -48,7 +48,69 @@ The repository launches an external binary under a pseudo-terminal, inspects its
 - The target binary is not included in this repository. The harness expects `./lvlupByMacaroni841` to exist and be executable.
 - Level 4 relies on the `LD_PRELOAD` hook and a Unix domain socket at `/tmp/keygen.sock` to communicate the current epoch.
 
-## Dependency
+## Learnings
+### asm
+- optimised modulo expression in asm
+for example:
+```
+call   11d0 <rand@plt>
+movsxd rdx,eax
+imul   rdx,rdx,0x66666667
+shr    rdx,0x20
+sar    edx,1
+mov    ecx,eax
+sar    ecx,0x1f
+sub    edx,ecx
+mov    DWORD PTR [rbp-0x358],edx
+mov    ecx,DWORD PTR [rbp-0x358]
+mov    edx,eax
+shl    edx,0x2
+add    edx,ecx
+sub    eax,edx
+mov    DWORD PTR [rbp-0x358],eax
+```
 
-- `github.com/creack/pty v1.1.24`
+imul with weird const and shr/sar
+then eax - n*edx -> modulo of %5 in this case 
 
+optimised modulo for 2^n
+
+```
+shr    edx,0x1e
+add    eax,edx
+and    eax,0x3
+sub    eax,edx
+```
+this is modulo 4 for signed
+-> x and 3 (mask de 3)
+
+  10101110
+  00000011
+->00000010 -> 2
+
+we just watch the x last bits
+---
+### gdb
+- Find an entrypoint of a stripped binary with gdb and `info file`
+- tricks on gdb to redirect i/o 
+```bash
+# note the output of terminal destination
+tty 
+tail -f /dev/null
+
+#then in gdb terminal
+tty /dev/pts/X # the result of tty 
+```
+- save to file some logs
+```bash
+#gdb
+set logging file <YourFile>
+set logging enabled on
+.....
+set logging enabled off
+```
+- save breakpoints 
+```bash 
+#gdb
+save breakpoints <my_file>
+```
